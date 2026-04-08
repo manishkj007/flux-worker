@@ -34,6 +34,7 @@ _torch = None
 VOLUME_BASE = os.environ.get("VOLUME_PATH", "/runpod-volume")
 MODEL_PATH = os.path.join(VOLUME_BASE, "flux-schnell")
 HF_MODEL_ID = "black-forest-labs/FLUX.1-schnell"
+HF_TOKEN = os.environ.get("HF_TOKEN", None)
 
 def ensure_torch():
     global _torch, device
@@ -60,7 +61,10 @@ def load_model():
         model_src = HF_MODEL_ID
         print(f"[flux] volume not found at {MODEL_PATH}, downloading from {model_src}")
 
-    pipe = FluxPipeline.from_pretrained(model_src, torch_dtype=torch.float16)
+    kwargs = {"torch_dtype": torch.float16}
+    if HF_TOKEN and model_src == HF_MODEL_ID:
+        kwargs["token"] = HF_TOKEN
+    pipe = FluxPipeline.from_pretrained(model_src, **kwargs)
 
     # Auto-save to network volume if downloaded from HF (for faster next cold start)
     if model_src == HF_MODEL_ID and os.path.isdir(VOLUME_BASE):
