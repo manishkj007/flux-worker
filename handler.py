@@ -100,9 +100,12 @@ def load_model():
     
     from diffusers import FluxPipeline
 
-    # Check if model is already on the volume
+    # Check if model is fully on the volume (model_index.json + at least one safetensors)
     model_index = os.path.join(MODEL_PATH, "model_index.json")
-    if os.path.isdir(MODEL_PATH) and os.path.isfile(model_index):
+    has_safetensors = any(f.endswith(".safetensors") for f in os.listdir(MODEL_PATH)) if os.path.isdir(MODEL_PATH) else False
+    has_merges = os.path.isfile(os.path.join(MODEL_PATH, "tokenizer", "merges.txt")) or os.path.isfile(os.path.join(MODEL_PATH, "tokenizer_2", "merges.txt"))
+    
+    if os.path.isdir(MODEL_PATH) and os.path.isfile(model_index) and has_safetensors and has_merges:
         print(f"[flux] loading from network volume: {MODEL_PATH}")
         try:
             pipe = FluxPipeline.from_pretrained(
@@ -119,7 +122,7 @@ def load_model():
                 repo_id=HF_MODEL_ID,
                 local_dir=MODEL_PATH,
                 token=HF_TOKEN,
-                ignore_patterns=["*.md", "*.txt", ".gitattributes"],
+                ignore_patterns=["*.md", ".gitattributes"],
             )
         except Exception as e:
             info = get_disk_info()
