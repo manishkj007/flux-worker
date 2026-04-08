@@ -57,20 +57,23 @@ def load_model():
     torch = ensure_torch()
     from diffusers import FluxPipeline
 
-    # Prefer saved model on network volume, otherwise load via HF hub.
-    # With HF_HOME=/runpod-volume/hf_cache, HF cache lives on the volume,
-    # so subsequent cold starts load from cache without re-downloading.
+    # Check if model is already on the volume
     if os.path.isdir(MODEL_PATH) and os.path.isfile(os.path.join(MODEL_PATH, "model_index.json")):
-        model_src = MODEL_PATH
-        print(f"[flux] loading from network volume: {model_src}")
+        print(f"[flux] loading from network volume: {MODEL_PATH}")
+        pipe = FluxPipeline.from_pretrained(MODEL_PATH, torch_dtype=torch.float16)
     else:
-        model_src = HF_MODEL_ID
-        print(f"[flux] downloading from HF: {model_src} (HF cache on volume)")
+        # Download directly to volume path using snapshot_download (avoids HF cache duplication)
+        print(f"[flux] model not on volume, downloading to {MODEL_PATH}...")
+        from huggingface_hub import snapshot_download
+        snapshot_download(
+            repo_id=HF_MODEL_ID,
+            local_dir=MODEL_PATH,
+            token=HF_TOKEN,
+            ignore_patterns=["*.md", "*.txt", ".gitattributes"],
+        )
+        print(f"[flux] download complete, loading model...")
+        pipe = FluxPipeline.from_pretrained(MODEL_PATH, torch_dtype=torch.float16)
 
-    kwargs = {"torch_dtype": torch.float16}
-    if HF_TOKEN and model_src == HF_MODEL_ID:
-        kwargs["token"] = HF_TOKEN
-    pipe = FluxPipeline.from_pretrained(model_src, **kwargs)
     pipe.enable_model_cpu_offload()
     print(f"[flux] ready on {device}")
 
