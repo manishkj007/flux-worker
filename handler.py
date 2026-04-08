@@ -53,28 +53,20 @@ def load_model():
     torch = ensure_torch()
     from diffusers import FluxPipeline
 
-    # Prefer network volume, fallback to HF hub (and save to volume for next time)
+    # Prefer saved model on network volume, otherwise load via HF hub.
+    # With HF_HOME=/runpod-volume/hf_cache, HF cache lives on the volume,
+    # so subsequent cold starts load from cache without re-downloading.
     if os.path.isdir(MODEL_PATH) and os.path.isfile(os.path.join(MODEL_PATH, "model_index.json")):
         model_src = MODEL_PATH
         print(f"[flux] loading from network volume: {model_src}")
     else:
         model_src = HF_MODEL_ID
-        print(f"[flux] volume not found at {MODEL_PATH}, downloading from {model_src}")
+        print(f"[flux] downloading from HF: {model_src} (HF cache on volume)")
 
     kwargs = {"torch_dtype": torch.float16}
     if HF_TOKEN and model_src == HF_MODEL_ID:
         kwargs["token"] = HF_TOKEN
     pipe = FluxPipeline.from_pretrained(model_src, **kwargs)
-
-    # Auto-save to network volume if downloaded from HF (for faster next cold start)
-    if model_src == HF_MODEL_ID and os.path.isdir(VOLUME_BASE):
-        try:
-            print(f"[flux] saving to network volume: {MODEL_PATH}")
-            pipe.save_pretrained(MODEL_PATH)
-            print(f"[flux] saved successfully")
-        except Exception as e:
-            print(f"[flux] warning: could not save to volume: {e}")
-
     pipe.enable_model_cpu_offload()
     print(f"[flux] ready on {device}")
 
