@@ -92,38 +92,90 @@ def load_model():
     cleanup_old_cache()
     disk_usage()
     
-    torch = ensure_torch()
+    try:
+        torch = ensure_torch()
+    except Exception as e:
+        info = get_disk_info()
+        raise RuntimeError(f"torch import failed: {e} | disk: {info}")
+    
     from diffusers import FluxPipeline
 
     # Check if model is already on the volume
     model_index = os.path.join(MODEL_PATH, "model_index.json")
     if os.path.isdir(MODEL_PATH) and os.path.isfile(model_index):
         print(f"[flux] loading from network volume: {MODEL_PATH}")
-        pipe = FluxPipeline.from_pretrained(
-            MODEL_PATH, torch_dtype=torch.float16, local_files_only=True
-        )
+        try:
+            pipe = FluxPipeline.from_pretrained(
+                MODEL_PATH, torch_dtype=torch.float16, local_files_only=True
+            )
+        except Exception as e:
+            info = get_disk_info()
+            raise RuntimeError(f"from_pretrained failed: {e} | disk: {info}")
     else:
         print(f"[flux] model not on volume, downloading to {MODEL_PATH}...")
-        from huggingface_hub import snapshot_download
-        snapshot_download(
-            repo_id=HF_MODEL_ID,
-            local_dir=MODEL_PATH,
-            token=HF_TOKEN,
-            ignore_patterns=["*.md", "*.txt", ".gitattributes"],
-        )
+        try:
+            from huggingface_hub import snapshot_download
+            snapshot_download(
+                repo_id=HF_MODEL_ID,
+                local_dir=MODEL_PATH,
+                token=HF_TOKEN,
+                ignore_patterns=["*.md", "*.txt", ".gitattributes"],
+            )
+        except Exception as e:
+            info = get_disk_info()
+            raise RuntimeError(f"snapshot_download failed: {e} | disk: {info}")
         print(f"[flux] download complete, loading model...")
         disk_usage()
-        pipe = FluxPipeline.from_pretrained(
-            MODEL_PATH, torch_dtype=torch.float16, local_files_only=True
-        )
+        try:
+            pipe = FluxPipeline.from_pretrained(
+                MODEL_PATH, torch_dtype=torch.float16, local_files_only=True
+            )
+        except Exception as e:
+            info = get_disk_info()
+            raise RuntimeError(f"from_pretrained(post-download) failed: {e} | disk: {info}")
 
     pipe.enable_model_cpu_offload()
     print(f"[flux] ready on {device}")
     disk_usage()
 
+def get_disk_info():
+    """Return disk info as dict for diagnostic output."""
+    info = {}
+    try:
+        for path in ["/", VOLUME_BASE]:
+            st = os.statvfs(path)
+            total = st.f_blocks * st.f_frsize / (1024**3)
+            free = st.f_bfree * st.f_frsize / (1024**3)
+            info[path] = f"{total-free:.1f}G/{total:.1f}G used ({free:.1f}G free)"
+        if os.path.isdir(VOLUME_BASE):
+            entries = []
+            for entry in os.listdir(VOLUME_BASE):
+                fp = os.path.join(VOLUME_BASE, entry)
+                if os.path.isdir(fp):
+                    try:
+                        sz = subprocess.check_output(["du", "-sh", fp], timeout=10).decode().split()[0]
+                    except Exception:
+                        sz = "?"
+                    entries.append(f"{entry}/={sz}")
+            info["volume_contents"] = ", ".join(entries)
+    except Exception as e:
+        info["disk_error"] = str(e)
+    return info
+
 def handler(event):
     try:
         inp = event.get("input", {})
+        
+        # Diagnostic mode
+        if inp.get("diag"):
+            info = get_disk_info()
+            info["env"] = {k: os.environ.get(k, "NOT SET") for k in [
+                "VOLUME_PATH", "HF_HOME", "TMPDIR", "TEMP", "TORCH_HOME", 
+                "XDG_CACHE_HOME", "HF_HUB_CACHE"
+            ]}
+            info["model_exists"] = os.path.isfile(os.path.join(MODEL_PATH, "model_index.json"))
+            return info
+        
         prompt = inp.get("prompt", "")
         if not prompt:
             return {"error": "prompt is required"}
