@@ -149,14 +149,23 @@ def get_disk_info():
             info[path] = f"{total-free:.1f}G/{total:.1f}G used ({free:.1f}G free)"
         if os.path.isdir(VOLUME_BASE):
             entries = []
-            for entry in os.listdir(VOLUME_BASE):
+            for entry in sorted(os.listdir(VOLUME_BASE)):
                 fp = os.path.join(VOLUME_BASE, entry)
                 if os.path.isdir(fp):
                     try:
-                        sz = subprocess.check_output(["du", "-sh", fp], timeout=10).decode().split()[0]
+                        sz = subprocess.check_output(["du", "-sh", fp], timeout=30).decode().split()[0]
                     except Exception:
                         sz = "?"
                     entries.append(f"{entry}/={sz}")
+                    # List subdirs for models/
+                    if entry == "models":
+                        for sub in sorted(os.listdir(fp)):
+                            sp = os.path.join(fp, sub)
+                            try:
+                                sz2 = subprocess.check_output(["du", "-sh", sp], timeout=30).decode().split()[0]
+                            except Exception:
+                                sz2 = "?"
+                            entries.append(f"  models/{sub}={sz2}")
             info["volume_contents"] = ", ".join(entries)
     except Exception as e:
         info["disk_error"] = str(e)
@@ -174,6 +183,24 @@ def handler(event):
                 "XDG_CACHE_HOME", "HF_HUB_CACHE"
             ]}
             info["model_exists"] = os.path.isfile(os.path.join(MODEL_PATH, "model_index.json"))
+            return info
+        
+        # Cleanup mode - remove specific directories from volume
+        if inp.get("cleanup"):
+            results = []
+            for name in inp["cleanup"]:
+                fp = os.path.join(VOLUME_BASE, name)
+                if os.path.exists(fp):
+                    try:
+                        sz = subprocess.check_output(["du", "-sh", fp], timeout=30).decode().split()[0]
+                    except Exception:
+                        sz = "?"
+                    shutil.rmtree(fp, ignore_errors=True)
+                    results.append(f"removed {name} ({sz})")
+                else:
+                    results.append(f"{name} not found")
+            info = get_disk_info()
+            info["cleanup_results"] = results
             return info
         
         prompt = inp.get("prompt", "")
