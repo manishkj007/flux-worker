@@ -1,44 +1,75 @@
 """
 RunPod Serverless handler — FLUX.1-schnell Text-to-Image.
 Light worker: model weights loaded from RunPod network storage volume.
-Deploy on RunPod as a serverless endpoint with an A40/L40S/A100 GPU.
-
-Network storage setup:
-  Mount your RunPod network volume at /runpod-volume. Model should be at:
-    /runpod-volume/flux-schnell/
-
-  To pre-download (one-time):
-    from diffusers import FluxPipeline; import torch
-    pipe = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-schnell", torch_dtype=torch.float16)
-    pipe.save_pretrained("/runpod-volume/flux-schnell")
-
-Input:
-  prompt: str          — image prompt
-  width: int           — default 1024
-  height: int          — default 1792 (9:16 for reels)
-  num_inference_steps: int — default 4 (schnell is fast)
-  seed: int            — optional reproducibility
-
-Returns:
-  image_base64: str    — PNG image as base64
-  inference_time: float
 """
-import os, time, base64, io, uuid
+import os, time, base64, io, shutil, subprocess
+
+# ── Force ALL caches/temps to network volume BEFORE any other imports ──
+VOLUME_BASE = os.environ.get("VOLUME_PATH", "/runpod-volume")
+_vol_cache = os.path.join(VOLUME_BASE, "cache")
+_vol_tmp = os.path.join(VOLUME_BASE, "tmp")
+
+for d in [_vol_cache, _vol_tmp]:
+    os.makedirs(d, exist_ok=True)
+
+# Redirect every known cache/temp env var to the volume
+os.environ["HF_HOME"] = _vol_cache
+os.environ["HF_HUB_CACHE"] = os.path.join(_vol_cache, "hub")
+os.environ["HUGGINGFACE_HUB_CACHE"] = os.path.join(_vol_cache, "hub")
+os.environ["TRANSFORMERS_CACHE"] = os.path.join(_vol_cache, "transformers")
+os.environ["TORCH_HOME"] = os.path.join(_vol_cache, "torch")
+os.environ["XDG_CACHE_HOME"] = _vol_cache
+os.environ["TMPDIR"] = _vol_tmp
+os.environ["TEMP"] = _vol_tmp
+os.environ["TMP"] = _vol_tmp
+
 import runpod
 
 pipe = None
 device = "cuda"
 _torch = None
 
-# Network volume paths
-VOLUME_BASE = os.environ.get("VOLUME_PATH", "/runpod-volume")
 MODEL_PATH = os.path.join(VOLUME_BASE, "flux-schnell")
 HF_MODEL_ID = "black-forest-labs/FLUX.1-schnell"
 HF_TOKEN = os.environ.get("HF_TOKEN", None)
 
-# Ensure temp dir exists on volume (for safetensors reconstruction)
-_tmpdir = os.environ.get("TMPDIR", "/tmp")
-os.makedirs(_tmpdir, exist_ok=True)
+
+def disk_usage():
+    """Print disk usage for debugging."""
+    try:
+        for path in ["/", VOLUME_BASE]:
+            st = os.statvfs(path)
+            total = st.f_blocks * st.f_frsize / (1024**3)
+            free = st.f_bfree * st.f_frsize / (1024**3)
+            used = total - free
+            print(f"[disk] {path}: {used:.1f}G/{total:.1f}G used ({free:.1f}G free)")
+        # List top-level volume contents  
+        if os.path.isdir(VOLUME_BASE):
+            for entry in os.listdir(VOLUME_BASE):
+                fp = os.path.join(VOLUME_BASE, entry)
+                if os.path.isdir(fp):
+                    try:
+                        sz = subprocess.check_output(["du", "-sh", fp], timeout=10).decode().split()[0]
+                    except Exception:
+                        sz = "?"
+                    print(f"[disk]   {entry}/ => {sz}")
+    except Exception as e:
+        print(f"[disk] error: {e}")
+
+
+def cleanup_old_cache():
+    """Remove old HF cache and tmp to free space on the volume."""
+    for name in ["hf_cache", "tmp"]:
+        old = os.path.join(VOLUME_BASE, name)
+        if os.path.isdir(old):
+            sz = "?"
+            try:
+                sz = subprocess.check_output(["du", "-sh", old], timeout=30).decode().split()[0]
+            except Exception:
+                pass
+            print(f"[cleanup] removing old {old} ({sz})")
+            shutil.rmtree(old, ignore_errors=True)
+
 
 def ensure_torch():
     global _torch, device
@@ -50,19 +81,28 @@ def ensure_torch():
     print(f"[init] torch={torch.__version__} cuda={torch.cuda.is_available()}")
     return torch
 
+
 def load_model():
     global pipe
     if pipe is not None:
         return
+    
+    print("[flux] === starting model load ===")
+    disk_usage()
+    cleanup_old_cache()
+    disk_usage()
+    
     torch = ensure_torch()
     from diffusers import FluxPipeline
 
     # Check if model is already on the volume
-    if os.path.isdir(MODEL_PATH) and os.path.isfile(os.path.join(MODEL_PATH, "model_index.json")):
+    model_index = os.path.join(MODEL_PATH, "model_index.json")
+    if os.path.isdir(MODEL_PATH) and os.path.isfile(model_index):
         print(f"[flux] loading from network volume: {MODEL_PATH}")
-        pipe = FluxPipeline.from_pretrained(MODEL_PATH, torch_dtype=torch.float16)
+        pipe = FluxPipeline.from_pretrained(
+            MODEL_PATH, torch_dtype=torch.float16, local_files_only=True
+        )
     else:
-        # Download directly to volume path using snapshot_download (avoids HF cache duplication)
         print(f"[flux] model not on volume, downloading to {MODEL_PATH}...")
         from huggingface_hub import snapshot_download
         snapshot_download(
@@ -72,10 +112,14 @@ def load_model():
             ignore_patterns=["*.md", "*.txt", ".gitattributes"],
         )
         print(f"[flux] download complete, loading model...")
-        pipe = FluxPipeline.from_pretrained(MODEL_PATH, torch_dtype=torch.float16)
+        disk_usage()
+        pipe = FluxPipeline.from_pretrained(
+            MODEL_PATH, torch_dtype=torch.float16, local_files_only=True
+        )
 
     pipe.enable_model_cpu_offload()
     print(f"[flux] ready on {device}")
+    disk_usage()
 
 def handler(event):
     try:
