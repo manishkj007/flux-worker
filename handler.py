@@ -36,6 +36,10 @@ MODEL_PATH = os.path.join(VOLUME_BASE, "flux-schnell")
 HF_MODEL_ID = "black-forest-labs/FLUX.1-schnell"
 HF_TOKEN = os.environ.get("HF_TOKEN", None)
 
+# Ensure temp dir exists on volume (for safetensors reconstruction)
+_tmpdir = os.environ.get("TMPDIR", "/tmp")
+os.makedirs(_tmpdir, exist_ok=True)
+
 def ensure_torch():
     global _torch, device
     if _torch is not None:
